@@ -15,17 +15,14 @@
 #include <asm/uaccess.h>
 #include "kfetch.h"
 
+// Color: bold light yellow
+#define COLOR_PRIMARY "\e[1;93m"
+#define COLOR_DEFAULT "\e[0m"
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("NYCU 312551165");
-MODULE_DESCRIPTION("kfetch");
+MODULE_DESCRIPTION("HW3");
 MODULE_VERSION("0.1");
-
-#define KFETCH_DEV_NAME "kfetch"
-
-/* MAX_LENGTH is set to 92 because
- * ssize_t can't fit the number > 92
- */
-#define MAX_LENGTH 92
 
 static dev_t kfetch_dev = 0;
 static struct class *kfetch_class;
@@ -34,19 +31,28 @@ static int major = 0, minor = 0;
 
 static int kfetch_mask_info = 0;
 
-const char icon[8][20] = {
+const char ICON[8][50] = {
     "                   ",
     "        .-.        ",
     "       (.. |       ",
-    "       <>  |       ",
+    "       " COLOR_PRIMARY "<>" COLOR_DEFAULT "  |       ",
     "      / --- \\      ",
     "     ( |   | |     ",
-    "   |\\\\_)___/\\)/\\   ",
-    "  <__)------(__/   "};
+    COLOR_PRIMARY "   |\\" COLOR_DEFAULT "\\_)___/\\)" COLOR_PRIMARY "/\\   " COLOR_DEFAULT,
+    COLOR_PRIMARY "  <__)" COLOR_DEFAULT "------" COLOR_PRIMARY "(__/   " COLOR_DEFAULT};
 
-static char buf[100] = "";
+// printing order
+const int KFETCH_INFO_PRINT_ORDER[KFETCH_NUM_INFO] = {
+    KFETCH_RELEASE,
+    KFETCH_CPU_MODEL,
+    KFETCH_NUM_CPUS,
+    KFETCH_MEM,
+    KFETCH_NUM_PROCS,
+    KFETCH_UPTIME,
+};
 
-static void read_file(char *filename, char *buffer)
+// read file in kernel space
+static void read_file(char *filename, char *buffer, size_t len)
 {
     struct file *fp;
     fp = filp_open(filename, O_RDONLY, 0);
@@ -54,110 +60,119 @@ static void read_file(char *filename, char *buffer)
         printk("filp_open error: %ld\n", PTR_ERR(fp));
         return;
     }
-    kernel_read(fp, buffer, 100, 0);
+    kernel_read(fp, buffer, len, 0);
     filp_close(fp, NULL);
 }
 
-static void kfetch_cpu_model(char *ret)
+// read cpu model name
+static const char* kfetch_cpu_model(void)
 {
-    // 
-    // or use current cpu speed
-    read_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", buf);
+    static char ret[100] = "";
+    char temp[100] = "";
+    // max freq
+    read_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", temp, 100);
     long freq = 0;
-    kstrtol(buf, 10, &freq);
+    if (kstrtol(temp, 10, &freq)) {
+        freq = 0;
+    }
     struct cpuinfo_x86 *c = &cpu_data(0);
     if (freq == 0) {
         sprintf(ret, "%s", c->x86_model_id);
     }
     else {
-        sprintf(ret, "%s @ %ldGHz", c->x86_model_id, freq);
+        sprintf(ret, "%s @ %ld.%ldGHz", c->x86_model_id, freq/1000/1000, freq/1000%1000);
     }
+    return ret;
 }
 
-static char* hello(void)
+void color_sprintf(char *des, const char *s, const char *color)
 {
-    int info_count = 0;
-    char infos[8][80] = { 0 };
+    sprintf(des, "%s%s%s", color, s, COLOR_DEFAULT);
+}
+
+static const char* get_info(int v) {
+    static char ret[100] = "";
+    switch (v) {
+        case KFETCH_CPU_MODEL:
+            color_sprintf(ret, "CPU:      ", COLOR_PRIMARY);
+            strcat(ret, kfetch_cpu_model());
+            break;
+        case KFETCH_NUM_CPUS:
+            color_sprintf(ret, "CPUs:     ", COLOR_PRIMARY);
+            sprintf(ret+strlen(ret), "%u / %u", num_online_cpus(), num_present_cpus());
+            break;
+        case KFETCH_RELEASE:
+            color_sprintf(ret, "Kernel:   ", COLOR_PRIMARY);
+            strcat(ret, utsname()->release);
+            break;
+        case KFETCH_MEM:
+            struct sysinfo i;
+            si_meminfo(&i);
+            unsigned long available = (si_mem_available() << (PAGE_SHIFT - 10)) / 1024;
+            unsigned long total = (i.totalram << (PAGE_SHIFT - 10)) / 1024;
+            color_sprintf(ret, "Mem:      ", COLOR_PRIMARY);
+            sprintf(ret+strlen(ret), "%lu MB / %lu MB", available , total);
+            break;
+        case KFETCH_UPTIME:
+            s64 uptime;
+            uptime = ktime_divns(ktime_get_coarse_boottime(), NSEC_PER_SEC);
+            color_sprintf(ret, "Uptime:   ", COLOR_PRIMARY);
+            sprintf(ret+strlen(ret), "%llu mins", uptime/60);
+            break;
+        case KFETCH_NUM_PROCS:
+            char temp[100] = "";
+            read_file("/proc/loadavg", temp, 100);
+            int u, v;
+            sscanf(temp, "%*u.%*u %*u.%*u %*u.%*u %d/%d", &u, &v);
+            color_sprintf(ret, "Procs:    ", COLOR_PRIMARY);
+            sprintf(ret+strlen(ret), "%d", v);
+            break;
+        default:
+            ret[0] = '\0';
+    }
+    return ret;
+}
+
+static void kfetch_output(char *output)
+{
     const char *hostname = utsname()->nodename;
-    // The first line is the machine hostname, which is mandatory and cannot be disabled
-    strcpy(infos[0], hostname);
+    const int hostname_len = strlen(hostname);
 
-    // The next line is a separator line with a length equal to the hostname
-    memset(infos[1], '-', strlen(hostname));
+    int info_i = 0;
 
-    int info_order[KFETCH_NUM_INFO] = {
-        // 1. Kernel: The kernel release
-        KFETCH_RELEASE,
-        // 2. CPU: The CPU model name
-        KFETCH_CPU_MODEL,
-        // 3. CPUs: The number of CPU cores, in the format <# of online CPUs> / <# of total CPUs>
-        KFETCH_NUM_CPUS,
-        // 4. Mem: The memory information, in the format<free memory> / <total memory> (in MB)
-        KFETCH_MEM,
-        // 5. Procs: The number of processes
-        KFETCH_NUM_PROCS,
-        // 6. Uptime: How long the system has been running, in minutes.
-        KFETCH_UPTIME,
-    };
-
-    for (int i = 0; i < KFETCH_NUM_INFO; i++) {
-        if (kfetch_mask_info & info_order[i]) {
-            char temp[200] = "";
-            switch (info_order[i]) {
-                case KFETCH_CPU_MODEL:
-                    kfetch_cpu_model(buf);
-                    sprintf(temp, "CPU:      %s", buf);
-                    break;
-                case KFETCH_NUM_CPUS:
-                    sprintf(temp, "CPUs:     %u / %u", num_online_cpus(), num_present_cpus());
-                    break;
-                case KFETCH_RELEASE:
-                    sprintf(temp, "Kernel:   %s", utsname()->release);
-                    break;
-                case KFETCH_MEM:
-                    struct sysinfo i;
-                    si_meminfo(&i);
-                    // ref: MemUsed = Memtotal + Shmem - MemFree - Buffers - Cached - SReclaimable
-                    unsigned long available = (si_mem_available() << (PAGE_SHIFT - 10)) / 1024;
-                    unsigned long total = (i.totalram << (PAGE_SHIFT - 10)) / 1024;
-                    sprintf(temp, "Mem:      %lu MB / %lu MB", available , total);
-                    break;
-                case KFETCH_UPTIME:
-                    s64  uptime;
-                    uptime = ktime_divns(ktime_get_coarse_boottime(), NSEC_PER_SEC);
-                    sprintf(temp, "Uptime:   %llu mins", uptime/60);
-                    break;
-                case KFETCH_NUM_PROCS:
-                    read_file("/proc/loadavg", buf);
-                    int u, v;
-                    sscanf(buf, "%*lu.%*lu %*lu.%*lu %*lu.%*lu %d/%d", &u, &v);
-                    sprintf(temp, "Procs:    %d", v);
-                    break;
-
-            }
-            strcpy(infos[info_count+2], temp);
-            info_count++;
-        }
-    }
-
-
-    int s_len = 0;
-    static char s[1000] = "";
-
+    int len = 0;
     for (int i = 0; i < 8; i++) {
-        int len = strlen(icon[i]);
-        strncpy(s+s_len, icon[i], len);
-        s_len += len;
-        if (i < info_count+2) {
-            len = strlen(infos[i]);
-            strncpy(s+s_len, infos[i], len);
-            s_len += len;
-        }
-        strncpy(s+s_len, "\n", 1);
-        s_len += 1;
-    }
+        strcpy(output + len, ICON[i]);
+        len += strlen(ICON[i]);
 
-    return s;
+        if (i == 0) {
+            color_sprintf(output + len, hostname, COLOR_PRIMARY);
+            len += strlen(output + len);
+        }
+        else if (i == 1) {
+            memset(output + len, '-', hostname_len);
+            len += strlen(output + len);
+        }
+        else {
+            // skip unspecified infos
+            while ((info_i < KFETCH_NUM_INFO) && !(KFETCH_INFO_PRINT_ORDER[info_i] & kfetch_mask_info)) {
+                info_i++;
+            }
+
+            if (info_i < KFETCH_NUM_INFO) {
+
+                const char *info = get_info(KFETCH_INFO_PRINT_ORDER[info_i]);
+                strcpy(output + len, info);
+                len += strlen(info);
+
+                info_i++;
+            }
+        }
+
+        // newline
+        memset(output + len, '\n', 1);
+        len++;
+    }
 }
 
 static int kfetch_open(struct inode *inode, struct file *file)
@@ -176,24 +191,19 @@ static int kfetch_release(struct inode *inode, struct file *file)
 }
 
 /* calculate the fibonacci number at given offset */
-static ssize_t kfetch_read(struct file *file,
-                        char *buf,
-                        size_t size,
-                        loff_t *offset)
+static ssize_t kfetch_read(struct file *file, char *buf, size_t size, loff_t *offset)
 {
-    char *s = hello();
+    char *s = kzalloc(KFETCH_BUF_SIZE, GFP_KERNEL);
+    kfetch_output(s);
     int len = strlen(s);
     if (copy_to_user(buf, s, len + 1)) {
         return -EFAULT;
     }
+    kfree(s);
     return len + 1;
 }
 
-/* write operation is skipped */
-static ssize_t kfetch_write(struct file *file,
-                         const char *buf,
-                         size_t size,
-                         loff_t *offset)
+static ssize_t kfetch_write(struct file *file, const char *buf, size_t size, loff_t *offset)
 {
     if (copy_from_user(&kfetch_mask_info, buf, size)) {
         return -EFAULT;
