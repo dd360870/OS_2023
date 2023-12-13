@@ -69,13 +69,14 @@ static const char* kfetch_cpu_model(void)
 {
     static char ret[100] = "";
     char temp[100] = "";
+    long freq = 0;
+    struct cpuinfo_x86 *c = &cpu_data(0);
+
     // max freq
     read_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", temp, 100);
-    long freq = 0;
     if (kstrtol(temp, 10, &freq)) {
         freq = 0;
     }
-    struct cpuinfo_x86 *c = &cpu_data(0);
     if (freq == 0) {
         sprintf(ret, "%s", c->x86_model_id);
     }
@@ -92,6 +93,10 @@ void color_sprintf(char *des, const char *s, const char *color)
 
 static const char* get_info(int v) {
     static char ret[100] = "";
+    struct sysinfo i;
+    unsigned long available, total;
+    s64 uptime;
+    int nr_running, nr_threads;
     switch (v) {
         case KFETCH_CPU_MODEL:
             color_sprintf(ret, "CPU:      ", COLOR_PRIMARY);
@@ -106,26 +111,22 @@ static const char* get_info(int v) {
             strcat(ret, utsname()->release);
             break;
         case KFETCH_MEM:
-            struct sysinfo i;
             si_meminfo(&i);
-            unsigned long available = (si_mem_available() << (PAGE_SHIFT - 10)) / 1024;
-            unsigned long total = (i.totalram << (PAGE_SHIFT - 10)) / 1024;
+            available = (si_mem_available() << (PAGE_SHIFT - 10)) / 1024;
+            total = (i.totalram << (PAGE_SHIFT - 10)) / 1024;
             color_sprintf(ret, "Mem:      ", COLOR_PRIMARY);
             sprintf(ret+strlen(ret), "%lu MB / %lu MB", available , total);
             break;
         case KFETCH_UPTIME:
-            s64 uptime;
             uptime = ktime_divns(ktime_get_coarse_boottime(), NSEC_PER_SEC);
             color_sprintf(ret, "Uptime:   ", COLOR_PRIMARY);
             sprintf(ret+strlen(ret), "%llu mins", uptime/60);
             break;
         case KFETCH_NUM_PROCS:
-            char temp[100] = "";
-            read_file("/proc/loadavg", temp, 100);
-            int u, v;
-            sscanf(temp, "%*u.%*u %*u.%*u %*u.%*u %d/%d", &u, &v);
+            read_file("/proc/loadavg", ret, 100);
+            sscanf(ret, "%*u.%*u %*u.%*u %*u.%*u %d/%d", &nr_running, &nr_threads);
             color_sprintf(ret, "Procs:    ", COLOR_PRIMARY);
-            sprintf(ret+strlen(ret), "%d", v);
+            sprintf(ret+strlen(ret), "%d", nr_threads);
             break;
         default:
             ret[0] = '\0';
@@ -194,8 +195,9 @@ static int kfetch_release(struct inode *inode, struct file *file)
 static ssize_t kfetch_read(struct file *file, char *buf, size_t size, loff_t *offset)
 {
     char *s = kzalloc(KFETCH_BUF_SIZE, GFP_KERNEL);
+    int len;
     kfetch_output(s);
-    int len = strlen(s);
+    len = strlen(s);
     if (copy_to_user(buf, s, len + 1)) {
         return -EFAULT;
     }
@@ -212,10 +214,10 @@ static ssize_t kfetch_write(struct file *file, const char *buf, size_t size, lof
 }
 
 const struct file_operations fib_fops = {
-    .owner = THIS_MODULE,
-    .read = kfetch_read,
-    .write = kfetch_write,
-    .open = kfetch_open,
+    .owner   = THIS_MODULE,
+    .read    = kfetch_read,
+    .write   = kfetch_write,
+    .open    = kfetch_open,
     .release = kfetch_release,
 };
 
